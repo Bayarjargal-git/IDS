@@ -1,56 +1,52 @@
 from scapy.all import *
-import scapy.all as scapy
 
-def get_mac(ip):
-    # Get the real MAC address of the sender
-    arp_request = scapy.ARP(pdst=ip)
-    broadcast = scapy.Ether(dst="ff:ff:ff:ff:ff:ff")
-    arp_request_broadcast = broadcast / arp_request
-    answered_list = scapy.srp(arp_request_broadcast, timeout=5, verbose=False)[0]
-    return answered_list[0][1].hwsrc
+# Dictionary to store MAC-IP mappings
+#Толь бичгийг MAC-IP хадгалахад ашиглана
+arp_table = {}
 
-def detect_arp_spoofing(packet):
-    if packet.haslayer(scapy.ARP):
-        if packet[scapy.ARP].op == 2:  # ARP response (ARP reply)
-            try:
-                real_mac = get_mac(packet[scapy.ARP].psrc)
-                response_mac = packet[scapy.ARP].hwsrc
-                if real_mac != response_mac:
-                    print(f"Potential ARP spoofing detected! Real MAC: {real_mac}, Response MAC: {response_mac}")
-            except IndexError:
-                pass
+# packet butsaaj duudah punkts
+def packet_callback(packet):
+    global arp_table #функц дотроос хандах боломжтой
 
-# Sniff ARP packets and call the detection function
-scapy.sniff(filter='arp', prn=detect_arp_spoofing)
+    if packet.haslayer(ARP):  # Пакет нь ARP давхарга агуулсан эсхийг шалгана
+        arp_src_ip = packet[ARP].psrc
+        arp_src_mac = packet[ARP].hwsrc   #ARP пакедаас ip,mac хаягийг гаргаж авдаг.
 
-class IDS:
-    def __init__(self, interface=None):
-        self.rules = {}
-        self.interface = interface or conf.iface
+        # ARP Poisoning detection logic arp_table бгаа мэдээлэлтэй таарахгүй бол Энэ нь илрүүлэлтийг харуулсан мессежийг хэвлэдэг
+        if arp_src_ip in arp_table and arp_table[arp_src_ip] != arp_src_mac:
+            print(f"ARP Poisoning detected! IP: {arp_src_ip}, Old MAC: {arp_table[arp_src_ip]}, New MAC: {arp_src_mac}")
 
-    def start_capture(self):
-        sniff(iface=self.interface, prn=self.process_packet)
+        # Update ARP table Дараа нь arp_table нь шинэ MAC-IP зураглалаар шинэчлэгдэнэ.
+        arp_table[arp_src_ip] = arp_src_mac
 
-    def process_packet(self, packet):
-        for header, blocks in self.rules.items():
-            if packet.haslayer(header):
-                for block in blocks:
-                    block(packet)
+    elif packet.haslayer(IP):
+        src_ip = packet[IP].src
+        dst_ip = packet[IP].dst
+        protocol = packet[IP].proto
 
-    def rule(self, header):
-        def decorator(func):
-            if header in self.rules:
-                self.rules[header].append(func)
-            else:
-                self.rules[header] = [func]
-            return func
-        return decorator
+        # Check for suspicious activity Сэжигтэй үйл ажиллагаа байгаа эсэхийг шалгана уу
+        if protocol == 6:  # TCP protocol
+            if packet.haslayer(TCP):
+                src_port = packet[TCP].sport
+                dst_port = packet[TCP].dport
 
-# Example usage:
-ids = IDS()
+                # Implement your detection logic here
+                if dst_port == 22:  # Detect SSH traffic илрүүлэх
+                    print(f"Potential SSH connection from {src_ip}:{src_port} to {dst_ip}:{dst_port}")
+                    # You can add more actions here, like logging or alerting
 
-@ids.rule(IP)
-def handle_ip(packet):
-    print("IP packet detected:", packet.summary())
+        elif protocol == 17:  # UDP protocol
+            if packet.haslayer(UDP):
+                src_port = packet[UDP].sport
+                dst_port = packet[UDP].dport
 
-ids.start_capture()
+                # Implement your detection logic here
+                if dst_port == 53:  # Detect DNS traffic илрүүлэх
+                    print(f"Potential DNS query from {src_ip}:{src_port} to {dst_ip}:{dst_port}")
+                    # You can add more actions here, like logging or alerting
+
+
+# Sniff packets on the network interface
+#Энэ нь баригдсан пакет бүрийн хувьд packet_callback функцийг дууддаг (prn=packet_callback)
+#ба store=0 нь баригдсан пакетуудыг санах ойд хадгалахгүй байхыг баталгаажуулдаг.
+sniff(prn=packet_callback, store=0)
