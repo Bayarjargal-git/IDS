@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:wifi_scan/wifi_scan.dart';
-import 'package:permission_handler/permission_handler.dart';
-import 'services/api_service.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:geolocator/geolocator.dart';
+import 'dart:math';
 
 class WifiPage extends StatefulWidget {
   const WifiPage({super.key});
@@ -11,83 +11,102 @@ class WifiPage extends StatefulWidget {
 }
 
 class _WifiPageState extends State<WifiPage> {
-  List<WiFiAccessPoint> nearbyWifis = [];
-  Map<String, int> trustScores = {};
+  Position? _position;
+  final double maxDistanceMeters = 1000; // 1km доторх WiFi-ууд
+  String _searchQuery = '';
 
   @override
   void initState() {
     super.initState();
-    _checkPermissions();
+    _getLocation();
   }
 
-  Future<void> _checkPermissions() async {
-    var status = await Permission.location.request();
-    if (status.isGranted) {
-      _scanNearbyWifi();
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Location permission required")),
-      );
+  Future<void> _getLocation() async {
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
     }
-  }
-
-  Future<void> _scanNearbyWifi() async {
-    final can = await WiFiScan.instance.canStartScan();
-
-    if (can == CanStartScan.yes) {
-      await WiFiScan.instance.startScan();
-      final results = await WiFiScan.instance.getScannedResults();
+    if (permission == LocationPermission.always ||
+        permission == LocationPermission.whileInUse) {
+      final pos = await Geolocator.getCurrentPosition();
       setState(() {
-        nearbyWifis = results;
+        _position = pos;
       });
-
-      // API руу оноо хүсэх
-      for (var wifi in results) {
-        final score = await getTrustScore(
-          wifi.level,          // signal
-          wifi.capabilities,   // encryption
-          "2.4GHz",            // жишээ band
-        );
-        setState(() {
-          trustScores[wifi.ssid] = score ?? 0;
-        });
-      }
     }
+  }
+
+  double _calculateDistance(double lat1, double lon1, double lat2, double lon2) {
+    return Geolocator.distanceBetween(lat1, lon1, lat2, lon2);
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text("Trusted WiFi Finder")),
-      body: ListView.builder(
-        itemCount: nearbyWifis.length,
-        itemBuilder: (context, index) {
-          final wifi = nearbyWifis[index];
-          final trust = trustScores[wifi.ssid] ?? 0;
-
-          return Card(
-            margin: const EdgeInsets.all(8),
-            child: ListTile(
-              leading: Icon(
-                Icons.wifi,
-                color: _getColorForTrust(trust),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(12.0),
+            child: TextField(
+              decoration: const InputDecoration(
+                hintText: "Search WiFi by name...",
+                prefixIcon: Icon(Icons.search),
+                border: OutlineInputBorder(),
               ),
-              title: Text(wifi.ssid),
-              subtitle: Text("Trust: $trust"),
+              onChanged: (value) {
+                setState(() {
+                  _searchQuery = value.toLowerCase();
+                });
+              },
             ),
-          );
-        },
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _scanNearbyWifi,
-        child: const Icon(Icons.refresh),
+          ),
+          Expanded(
+            child: _position == null
+                ? const Center(child: CircularProgressIndicator())
+                : StreamBuilder<QuerySnapshot>(
+              stream: FirebaseFirestore.instance
+                  .collection("wifi_hotspots")
+                  .snapshots(),
+              builder: (context, snapshot) {
+                if (!snapshot.hasData) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+
+                final nearby = snapshot.data!.docs.where((doc) {
+                  final data = doc.data() as Map<String, dynamic>;
+                  final lat = data['lat'];
+                  final lon = data['lon'];
+                  final ssid = (data['ssid'] ?? '').toString().toLowerCase();
+                  if (lat == null || lon == null) return false;
+                  final distance = _calculateDistance(
+                    _position!.latitude,
+                    _position!.longitude,
+                    lat,
+                    lon,
+                  );
+                  return distance < maxDistanceMeters &&
+                      ssid.contains(_searchQuery);
+                }).toList();
+
+                if (nearby.isEmpty) {
+                  return const Center(child: Text("No nearby WiFi found."));
+                }
+
+                return ListView(
+                  children: nearby.map((doc) {
+                    final data = doc.data() as Map<String, dynamic>;
+                    return ListTile(
+                      title: Text(data['ssid'] ?? 'Unknown'),
+                      subtitle: Text(
+                        "Lat: ${data['lat']}, Lon: ${data['lon']}",
+                      ),
+                    );
+                  }).toList(),
+                );
+              },
+            ),
+          ),
+        ],
       ),
     );
   }
-}
-
-Color _getColorForTrust(int trust) {
-  if (trust >= 70) return Colors.green;
-  if (trust >= 40) return Colors.orange;
-  return Colors.red;
 }
